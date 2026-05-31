@@ -32,21 +32,23 @@ Create a folder named `data` in the project root directory:
 │   ├── Amazon_train.csv
 │   ├── Twitter.csv
 │   └── Flipkart.csv
+```
 
 ###2. Dataset Sources & Formatting
 Download the following datasets and place them into the data/ folder:
-
-Amazon Dataset (Amazon_train.csv):
+```
+Amazon Dataset (Amazon_train.csv): https://www.kaggle.com/datasets/dongrelaxman/amazon-reviews-dataset
 
 Format: No headers. Column 1: Sentiment (1 = Negative, 2 = Positive), Column 2: Title, Column 3: Review Body.
 
-Twitter Dataset (Twitter.csv):
+Twitter Dataset (Twitter.csv): https://www.kaggle.com/datasets/dongrelaxman/amazon-reviews-dataset
 
 Format: No headers, latin-1 encoding. Column 1: Sentiment (0 = Negative, 4 = Positive), Column 6: Tweet Text.
 
-Flipkart Dataset (Flipkart.csv):
+Flipkart Dataset (Flipkart.csv): https://www.kaggle.com/datasets/dongrelaxman/amazon-reviews-dataset
 
 Format: Headers must include Review, Summary, and Sentiment (with values labeled as 'positive' or 'negative').
+```
 
 Note: The application's DataLoader automatically handles downsampling to 10,000 records upon execution to ensure smooth performance on standard laptops.
 
