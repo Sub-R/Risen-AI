@@ -1,0 +1,15 @@
+PySide6
+pandas
+numpy
+scikit-learn
+matplotlib
+seaborn
+wordcloud
+transformers
+torch
+python-dotenv
+requests
+joblib
+faiss-cpu
+sentence-transformers
+reportlab

@@ -1,0 +1,781 @@
+--------------------------------------File Management---------------------------------------
+    project/
+    │
+    ├── .env                  # (You will create this from the example)
+    ├── .env.example
+    ├── .gitignore
+    ├── requirements.txt
+    ├── README.md
+    ├── main.py               # Application Entry Point
+    ├── config/
+    │   └── settings.py       # Secret management
+    ├── data/                 # Place your CSV files here
+    ├── output/               # Exports and reports
+    ├── charts/               # Saved visualizations
+    ├── models/
+    │   ├── data_loader.py    # NLP Preprocessing & Normalization
+    │   ├── ml_engine.py      # TF-IDF & Logistic Regression
+    │   └── transformers.py   # HuggingFace NLP Layer
+    ├── chatbot/
+    │   └── copilot.py        # OpenRouter API Integration
+    └── ui/
+    |    ├── main_window.py    # PySide6 Layouts & Dark Theme
+    |    └── visualizations.py # Matplotlib embedded charts
+    --- build_vector_database.py
+--------------------------------------------------------------------------------------------
+
+
+---------------------------------------- Workflow ------------------------------------------
+
+    .env.example ---------------------------------------------------------------------------
+
+        # SECURITY: Never commit your actual .env file to version control.
+        OPENROUTER_API_KEY=your_openrouter_api_key_here
+        HUGGINGFACE_API_KEY=your_huggingface_api_key_here
+
+
+    .gitignore -----------------------------------------------------------------------------
+
+        # Environments
+        .env
+        .venv/
+        env/
+        venv/
+
+        # Python Cache
+        __pycache__/
+        *.pyc
+        *.pyo
+
+        # Data and Outputs (Optional depending on repo size)
+        output/
+        charts/
+
+
+    requirements.txt -----------------------------------------------------------------------
+
+        PySide6
+        pandas
+        numpy
+        scikit-learn
+        matplotlib
+        seaborn
+        wordcloud
+        transformers
+        torch
+        python-dotenv
+        requests
+        joblib
+        faiss-cpu
+        sentence-transformers
+        reportlab
+
+
+    pip install -r requirements.txt
+
+
+    build_vector_database.py ---------------------------------------------------------------
+
+    import os
+    import faiss
+    import joblib
+    import pandas as pd
+    from sentence_transformers import SentenceTransformer
+    from models.data_loader import DataLoader
+
+    def build_vector_db():
+        print("Loading datasets...")
+        df = DataLoader.get_unified_dataset()
+        
+        # Use a lightweight, highly effective embedding model
+        print("Loading SentenceTransformer model...")
+        embedder = SentenceTransformer('all-MiniLM-L6-v2')
+        
+        texts = df['Text'].tolist()
+        labels = df['Label'].tolist()
+        sources = df['Source'].tolist()
+        
+        print(f"Encoding {len(texts)} records (This may take a moment)...")
+        embeddings = embedder.encode(texts, show_progress_bar=True, convert_to_numpy=True)
+        
+        dimension = embeddings.shape[1]
+        index = faiss.IndexFlatL2(dimension)
+        index.add(embeddings)
+        
+        # Save Metadata for RAG context
+        metadata = [{'text': t, 'label': l, 'source': s} for t, l, s in zip(texts, labels, sources)]
+        
+        os.makedirs('models/saved', exist_ok=True)
+        faiss.write_index(index, 'models/saved/reviews.faiss')
+        joblib.dump(metadata, 'models/saved/metadata.pkl')
+        
+        print("Vector Database successfully built and saved to 'models/saved/'.")
+
+    if __name__ == "__main__":
+        build_vector_db()
+
+
+    config/settings.py ---------------------------------------------------------------------
+
+        import os
+        from dotenv import load_dotenv, set_key
+
+        # Load environment variables from .env file
+        load_dotenv()
+
+        class Config:
+            ENV_PATH = ".env"
+
+            @staticmethod
+            def get_openrouter_key():
+                return os.getenv("OPENROUTER_API_KEY", "")
+
+            @staticmethod
+            def get_huggingface_key():
+                return os.getenv("HUGGINGFACE_API_KEY", "")
+
+            @staticmethod
+            def update_key(key_name, value):
+                # Dynamically updates the .env file from the UI Settings panel
+                if not os.path.exists(Config.ENV_PATH):
+                    open(Config.ENV_PATH, 'w').close()
+                set_key(Config.ENV_PATH, key_name, value)
+                os.environ[key_name] = value
+
+
+    models/data_loader.py ------------------------------------------------------------------
+
+        import pandas as pd
+        import os
+
+        class DataLoader:
+            """Handles parsing and normalizing diverse datasets into a unified format."""
+            
+            @staticmethod
+            def load_amazon(filepath):
+                # Amazon: No headers. Col1=Sentiment(1=Neg, 2=Pos), Col2=Title, Col3=Body
+                df = pd.read_csv(filepath, header=None, names=['Label', 'Title', 'Body'], on_bad_lines='skip')
+                df['Text'] = df['Title'].fillna('') + " " + df['Body'].fillna('')
+                df['Label'] = df['Label'].map({1: 'Negative', 2: 'Positive'})
+                df['Source'] = 'Amazon'
+                return df[['Text', 'Label', 'Source']].dropna()
+
+            @staticmethod
+            def load_twitter(filepath):
+                # Twitter: No headers. Col1=Sentiment(0=Neg, 4=Pos), Col6=Text
+                cols = ['Label', 'ID', 'Date', 'Query', 'User', 'Text']
+                df = pd.read_csv(filepath, header=None, names=cols, on_bad_lines='skip', encoding='latin-1')
+                df['Label'] = df['Label'].map({0: 'Negative', 4: 'Positive'})
+                df['Source'] = 'Twitter'
+                return df[['Text', 'Label', 'Source']].dropna()
+
+            @staticmethod
+            def load_flipkart(filepath):
+                # Flipkart: Headers exist. Combine Review + Summary.
+                df = pd.read_csv(filepath, on_bad_lines='skip')
+                df['Text'] = df['Review'].fillna('') + " " + df['Summary'].fillna('')
+                df['Label'] = df['Sentiment'].str.capitalize() # 'positive' -> 'Positive'
+                df['Source'] = 'Flipkart'
+                return df[['Text', 'Label', 'Source']].dropna()
+
+            @staticmethod
+            def get_unified_dataset():
+                """Loads available data and concatenates them into one uniform pipeline."""
+                datasets = []
+                if os.path.exists('data/Amazon_train.csv'):
+                    datasets.append(DataLoader.load_amazon('data/Amazon_train.csv'))
+                if os.path.exists('data/Twitter.csv'):
+                    datasets.append(DataLoader.load_twitter('data/Twitter.csv'))
+                if os.path.exists('data/Flipkart.csv'):
+                    datasets.append(DataLoader.load_flipkart('data/Flipkart.csv'))
+                    
+                if not datasets:
+                    raise FileNotFoundError("No datasets found in the 'data/' folder.")
+                    
+                unified_df = pd.concat(datasets, ignore_index=True)
+                # Filter to binary sentiment for baseline ML model
+                unified_df = unified_df[unified_df['Label'].isin(['Positive', 'Negative'])]
+                        
+                # Sample for performance on standard laptops
+                if len(unified_df) > 10000:
+                    unified_df = unified_df.sample(10000, random_state=42)
+                            
+                return unified_df
+
+
+    models/ml_engine.py --------------------------------------------------------------------
+
+        from sklearn.feature_extraction.text import TfidfVectorizer
+        from sklearn.linear_model import LogisticRegression
+        from sklearn.model_selection import train_test_split
+        from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, confusion_matrix
+        import pandas as pd
+        from collections import Counter
+        import re
+        import os
+        import joblib
+
+        class ClassicalMLEngine:
+            def __init__(self):
+                self.vectorizer = TfidfVectorizer(max_features=5000, stop_words='english')
+                self.classifier = LogisticRegression(max_iter=1000)
+                self.metrics = {}
+                self.conf_matrix = None
+                self.save_dir = 'models/saved'
+                os.makedirs(self.save_dir, exist_ok=True)
+
+            def load_saved_model(self):
+                """Loads models if they exist, returning True if successful."""
+                try:
+                    self.vectorizer = joblib.load(f'{self.save_dir}/vectorizer.joblib')
+                    self.classifier = joblib.load(f'{self.save_dir}/classifier.joblib')
+                    self.metrics = joblib.load(f'{self.save_dir}/metrics.joblib')
+                    self.conf_matrix = joblib.load(f'{self.save_dir}/conf_matrix.joblib')
+                    return self.metrics, self.conf_matrix
+                except FileNotFoundError:
+                    return None, None
+
+            def train_and_evaluate(self, df):
+                X = self.vectorizer.fit_transform(df['Text'])
+                y = df['Label']
+                
+                X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+                
+                self.classifier.fit(X_train, y_train)
+                y_pred = self.classifier.predict(X_test)
+                
+                neg_text = " ".join(df[df['Label'] == 'Negative']['Text'].astype(str).tolist())
+                words = re.findall(r'\w+', neg_text.lower())
+                meaningful_words = [w for w in words if len(w) > 4 and w not in ['which', 'there', 'their', 'would', 'could']]
+                top_neg_words = [word for word, count in Counter(meaningful_words).most_common(10)]
+                
+                pos_text = " ".join(df[df['Label'] == 'Positive']['Text'].astype(str).tolist())
+                pos_words = re.findall(r'\w+', pos_text.lower())
+                meaningful_pos = [w for w in pos_words if len(w) > 4 and w not in ['which', 'there', 'their', 'would', 'could']]
+                top_pos_words = [word for word, count in Counter(meaningful_pos).most_common(10)]
+
+                pos_label = 'Positive'
+                self.metrics = {
+                    'Accuracy': round(accuracy_score(y_test, y_pred) * 100, 2),
+                    'Precision': round(precision_score(y_test, y_pred, pos_label=pos_label) * 100, 2),
+                    'Recall': round(recall_score(y_test, y_pred, pos_label=pos_label) * 100, 2),
+                    'F1_Score': round(f1_score(y_test, y_pred, pos_label=pos_label) * 100, 2),
+                    'Total_Analyzed': len(df),
+                    'Positive_Pct': round((len(df[df['Label'] == 'Positive']) / len(df)) * 100, 2),
+                    'Negative_Pct': round((len(df[df['Label'] == 'Negative']) / len(df)) * 100, 2),
+                    'Top_Negative_Words': top_neg_words,
+                    'Top_Positive_Words': top_pos_words,
+                    'Negative_Text_Corpus': neg_text,
+                    'Positive_Text_Corpus': pos_text
+                }
+                self.metrics['Customer_Satisfaction'] = self.metrics['Positive_Pct']
+                self.conf_matrix = confusion_matrix(y_test, y_pred, labels=['Negative', 'Positive'])
+                
+                # Save models to disk
+                joblib.dump(self.vectorizer, f'{self.save_dir}/vectorizer.joblib')
+                joblib.dump(self.classifier, f'{self.save_dir}/classifier.joblib')
+                joblib.dump(self.metrics, f'{self.save_dir}/metrics.joblib')
+                joblib.dump(self.conf_matrix, f'{self.save_dir}/conf_matrix.joblib')
+                
+                return self.metrics, self.conf_matrix
+
+
+    models/transformers.py -----------------------------------------------------------------
+
+        from transformers import pipeline
+
+        class TransformerLayer:
+            def __init__(self):
+                self.summarizer = None
+                self.sentiment_analyzer = None
+                
+            def load_models(self):
+                if not self.summarizer:
+                    self.summarizer = pipeline("summarization", model="sshleifer/distilbart-cnn-12-6")
+                if not self.sentiment_analyzer:
+                    self.sentiment_analyzer = pipeline("sentiment-analysis", model="distilbert-base-uncased-finetuned-sst-2-english")
+
+            def run_sentiment_comparison(self, sample_texts):
+                """Runs HuggingFace sentiment on a small batch to compare with LogReg.
+                We sample to avoid freezing the CPU on standard laptops."""
+                self.load_models()
+                try:
+                    results = self.sentiment_analyzer(sample_texts[:50]) # Limit to 50 for speed
+                    return results
+                except Exception as e:
+                    return str(e)
+
+
+    chatbot/copilot.py ---------------------------------------------------------------------
+
+        import requests
+        from config.settings import Config
+        from chatbot.rag_engine import RAGEngine
+
+        class AICopilot:
+            def __init__(self):
+                self.api_url = "https://openrouter.ai/api/v1/chat/completions"
+                self.conversation_history = []
+                self.rag = RAGEngine()
+                # Ensure RAG is loaded if FAISS index exists
+                self.rag.load_db()
+
+            def get_response(self, user_prompt, business_context):
+                api_key = Config.get_openrouter_key()
+                if not api_key:
+                    return "ERROR: OpenRouter API Key is missing. Please configure it in the Settings tab."
+
+                # RAG: Retrieve similar historical reviews based on the user's question
+                retrieved_reviews = self.rag.retrieve_context(user_prompt)
+
+                top_complaints = ", ".join(business_context.get('Top_Negative_Words', [])) if business_context.get('Top_Negative_Words') else "N/A"
+                top_positives = ", ".join(business_context.get('Top_Positive_Words', [])) if business_context.get('Top_Positive_Words') else "N/A"
+                
+                system_prompt = f"""
+                You are an elite 'AI Business Intelligence Copilot'. 
+                
+                Current KPIs:
+                - Accuracy: {business_context.get('Accuracy', 'N/A')}%
+                - CSAT: {business_context.get('Customer_Satisfaction', 'N/A')}%
+                - Total Reviews: {business_context.get('Total_Analyzed', 'N/A')}
+                - Top Complaints: {top_complaints}
+                - Top Strengths: {top_positives}
+                
+                RELEVANT CUSTOMER REVIEWS (RAG Context):
+                {retrieved_reviews}
+                
+                STRICT RULES:
+                1. Base your answers on the KPIs and the RAG Context provided above.
+                2. Format responses with short sentences and bullet points.
+                3. Never write code.
+                """
+
+                messages = [{"role": "system", "content": system_prompt}]
+                messages.extend(self.conversation_history)
+                messages.append({"role": "user", "content": user_prompt})
+
+                headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+                payload = {"model": "openrouter/free", "messages": messages}
+
+                try:
+                    response = requests.post(self.api_url, headers=headers, json=payload)
+                    response.raise_for_status()
+                    ai_reply = response.json()['choices'][0]['message']['content']
+                    
+                    self.conversation_history.append({"role": "user", "content": user_prompt})
+                    self.conversation_history.append({"role": "assistant", "content": ai_reply})
+                    return ai_reply
+                except Exception as e:
+                    return f"API Connection Error: {str(e)}"
+
+
+    chatbot/rag_engine.py ------------------------------------------------------------------
+
+        import os
+        import faiss
+        import joblib
+        from sentence_transformers import SentenceTransformer
+
+        class RAGEngine:
+            def __init__(self):
+                self.index = None
+                self.metadata = None
+                self.embedder = None
+                self.is_loaded = False
+
+            def load_db(self):
+                faiss_path = 'models/saved/reviews.faiss'
+                meta_path = 'models/saved/metadata.pkl'
+                
+                if os.path.exists(faiss_path) and os.path.exists(meta_path):
+                    self.index = faiss.read_index(faiss_path)
+                    self.metadata = joblib.load(meta_path)
+                    self.embedder = SentenceTransformer('all-MiniLM-L6-v2')
+                    self.is_loaded = True
+                    return True
+                return False
+
+            def retrieve_context(self, query, top_k=3):
+                if not self.is_loaded:
+                    return "Knowledge base not loaded."
+                    
+                query_vector = self.embedder.encode([query], convert_to_numpy=True)
+                distances, indices = self.index.search(query_vector, top_k)
+                
+                results = []
+                for idx in indices[0]:
+                    if idx != -1 and idx < len(self.metadata):
+                        meta = self.metadata[idx]
+                        results.append(f"[Source: {meta['source']} | Sentiment: {meta['label']}] {meta['text']}")
+                        
+                return "\n".join(results)
+
+
+    ui/visualizations.py -------------------------------------------------------------------
+
+        import matplotlib
+        matplotlib.use('qtagg') 
+        from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
+        import matplotlib.pyplot as plt
+        import seaborn as sns
+        from wordcloud import WordCloud # Moved import to the top
+
+        class DashboardCharts(FigureCanvas):
+            """Embeds Matplotlib charts directly into the PySide6 Desktop UI."""
+            def __init__(self, parent=None, width=8, height=6, dpi=100):
+                # Changed to a 2x2 grid to fit all 4 plots
+                self.fig, self.axes_matrix = plt.subplots(2, 2, figsize=(width, height), dpi=dpi)
+                self.axes = self.axes_matrix.flatten() # Flattens to a 1D array (indices 0 to 3)
+                self.fig.patch.set_facecolor('#1E1E1E') # Match dark theme
+                
+                super(DashboardCharts, self).__init__(self.fig)
+                if parent:
+                    self.setParent(parent) # Explicitly set the parent for PySide6 integration
+
+            def plot_data(self, metrics, conf_matrix):
+                # Clear all subplots cleanly
+                for ax in self.axes:
+                    ax.clear()
+
+                # 1. Pie Chart (Index 0)
+                labels = ['Positive', 'Negative']
+                sizes = [metrics.get('Positive_Pct', 50), metrics.get('Negative_Pct', 50)]
+                colors = ['#00E676', '#FF1744']
+                
+                _, texts, autotexts = self.axes[0].pie(sizes, labels=labels, colors=colors, autopct='%1.1f%%', startangle=90)
+                for text in texts + autotexts:
+                    text.set_color('white')
+                self.axes[0].set_title('Sentiment Distribution', color='white')
+
+                # 2. Word Cloud of Negative Texts (Index 1)
+                if 'Negative_Text_Corpus' in metrics and metrics['Negative_Text_Corpus']:
+                    wordcloud = WordCloud(width=400, height=300, background_color='#1E1E1E', colormap='Reds').generate(metrics['Negative_Text_Corpus'])
+                    self.axes[1].imshow(wordcloud, interpolation='bilinear')
+                    self.axes[1].axis('off')
+                    self.axes[1].set_title("Common Negative Words", color='white')
+                else:
+                    self.axes[1].text(0.5, 0.5, 'No Negative Text Data', horizontalalignment='center', verticalalignment='center', color='white', fontsize=12)
+                    self.axes[1].axis('off')
+
+                # 3. Word Cloud of Positive Texts (Index 2)
+                if 'Positive_Text_Corpus' in metrics and metrics['Positive_Text_Corpus']:
+                    wordcloud = WordCloud(width=400, height=300, background_color='#1E1E1E', colormap='Greens').generate(metrics['Positive_Text_Corpus'])
+                    self.axes[2].imshow(wordcloud, interpolation='bilinear')
+                    self.axes[2].axis('off')
+                    self.axes[2].set_title("Common Positive Words", color='white')
+                else:
+                    self.axes[2].text(0.5, 0.5, 'No Positive Text Data', horizontalalignment='center', verticalalignment='center', color='white', fontsize=12)
+                    self.axes[2].axis('off')
+
+                # 4. Confusion Matrix (Index 3)
+                if conf_matrix is not None:
+                    sns.heatmap(conf_matrix, annot=True, fmt='d', cmap='Blues', cbar=False, ax=self.axes[3],
+                                xticklabels=['Negative', 'Positive'], yticklabels=['Negative', 'Positive'])
+                    self.axes[3].set_title("ML Confusion Matrix", color='white')
+                    self.axes[3].tick_params(colors='white')
+                else:
+                    self.axes[3].text(0.5, 0.5, 'No Confusion Matrix', horizontalalignment='center', verticalalignment='center', color='white', fontsize=12)
+                    self.axes[3].axis('off')
+
+                # Adjust Layout and Refresh
+                self.fig.tight_layout()
+                self.fig.subplots_adjust(bottom=0.15, wspace=0.3, hspace=0.3)
+                self.draw()
+
+
+    ui/main_window.py ----------------------------------------------------------------------
+
+        from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
+                            QPushButton, QLabel, QStackedWidget, QFrame, 
+                            QGridLayout, QTextEdit, QLineEdit, QFormLayout, QMessageBox, QFileDialog)
+        from PySide6.QtCore import Qt, QThread, Signal
+        from PySide6.QtGui import QFont
+        from models.transformers_layer import TransformerLayer
+        from models.data_loader import DataLoader
+        from models.ml_engine import ClassicalMLEngine
+        from chatbot.copilot import AICopilot
+        from ui.visualizations import DashboardCharts
+        from config.settings import Config
+        import pandas as pd
+        from reportlab.pdfgen import canvas
+
+        class StartupWorker(QThread):
+            """Loads saved models and FAISS index silently in the background on boot."""
+            finished = Signal(object, object)
+            
+            def run(self):
+                engine = ClassicalMLEngine()
+                metrics, conf_matrix = engine.load_saved_model()
+                self.finished.emit(metrics, conf_matrix)
+        class MLWorker(QThread):
+            finished = Signal(object, object)
+            
+            def run(self):
+                df = DataLoader.get_unified_dataset()
+                
+                # 1. Classical ML
+                engine = ClassicalMLEngine()
+                metrics, conf_matrix = engine.train_and_evaluate(df)
+                
+                # 2. HuggingFace Transformer Comparison
+                try:
+                    hf_layer = TransformerLayer()
+                    # Sampling 10 records so the deep learning model doesn't freeze standard laptops
+                    sample_texts = df['Text'].head(10).tolist()
+                    hf_results = hf_layer.run_sentiment_comparison(sample_texts)
+                    metrics['HF_Comparison'] = hf_results
+                except Exception as e:
+                    metrics['HF_Comparison'] = f"Error: {str(e)}"
+                    
+                self.finished.emit(metrics, conf_matrix)
+
+        class MainWindow(QMainWindow):
+            def __init__(self):
+                super().__init__()
+                self.setWindowTitle("AI Business Intelligence Agent - Exec Dashboard")
+                self.setGeometry(100, 100, 1400, 850)
+                self.setStyleSheet("background-color: #121212; color: #FFFFFF;")
+                
+                self.metrics = {}
+                self.copilot = AICopilot()
+                self.init_ui()
+                
+                # Automatically load saved models to persist state
+                self.btn_train.setText("Loading Models...")
+                self.btn_train.setEnabled(False)
+                self.startup_worker = StartupWorker()
+                self.startup_worker.finished.connect(self.on_startup_complete)
+                self.startup_worker.start()
+
+            def on_startup_complete(self, metrics, conf_matrix):
+                if metrics:
+                    self.update_dashboard(metrics, conf_matrix)
+                    self.chat_history.append("<i>System: Restored previous AI model state. Ready.</i>")
+                else:
+                    self.btn_train.setText("▶ Run AI Pipeline")
+                    self.btn_train.setEnabled(True)
+                    self.chat_history.append("<i>System: No saved model found. Please run the AI Pipeline.</i>")
+
+            def init_ui(self):
+                main_widget = QWidget()
+                self.setCentralWidget(main_widget)
+                layout = QHBoxLayout(main_widget)
+
+                # ---------------- LEFT SIDEBAR ----------------
+                sidebar = QFrame()
+                sidebar.setFixedWidth(250)
+                sidebar.setStyleSheet("background-color: #1E1E1E; border-right: 1px solid #333;")
+                sidebar_layout = QVBoxLayout(sidebar)
+                
+                title = QLabel("BI COPILOT")
+                title.setFont(QFont("Segoe UI", 18, QFont.Bold))
+                sidebar_layout.addWidget(title)
+
+                self.btn_dashboard = self.create_nav_button("📊 Dashboard")
+                self.btn_chatbot = self.create_nav_button("🤖 AI Chatbot")
+                self.btn_settings = self.create_nav_button("⚙️ Settings")
+                
+                self.btn_dashboard.clicked.connect(lambda: self.stack.setCurrentIndex(0))
+                self.btn_chatbot.clicked.connect(lambda: self.stack.setCurrentIndex(1))
+                self.btn_settings.clicked.connect(lambda: self.stack.setCurrentIndex(2))
+
+                sidebar_layout.addWidget(self.btn_dashboard)
+                sidebar_layout.addWidget(self.btn_chatbot)
+                sidebar_layout.addWidget(self.btn_settings)
+                sidebar_layout.addStretch()
+
+                # Action Buttons
+                self.btn_export_pdf = QPushButton("📄 Export PDF Report")
+                self.btn_export_pdf.setStyleSheet("background-color: #03DAC6; color: black; padding: 10px; margin-bottom: 5px;")
+                self.btn_export_pdf.clicked.connect(self.export_pdf)
+                sidebar_layout.addWidget(self.btn_export_pdf)
+
+                self.btn_train = QPushButton("▶ Retrain ML Pipeline")
+                self.btn_train.setStyleSheet("background-color: #BB86FC; color: black; font-weight: bold; padding: 15px;")
+                self.btn_train.clicked.connect(self.run_pipeline)
+                sidebar_layout.addWidget(self.btn_train)
+
+                layout.addWidget(sidebar)
+
+                # ---------------- MAIN CONTENT AREA ----------------
+                self.stack = QStackedWidget()
+                layout.addWidget(self.stack)
+
+                self.dashboard_view = QWidget()
+                self.build_dashboard(self.dashboard_view)
+                self.stack.addWidget(self.dashboard_view)
+
+                self.chatbot_view = QWidget()
+                self.build_chatbot(self.chatbot_view)
+                self.stack.addWidget(self.chatbot_view)
+
+                self.settings_view = QWidget()
+                self.build_settings(self.settings_view)
+                self.stack.addWidget(self.settings_view)
+
+            def create_nav_button(self, text):
+                btn = QPushButton(text)
+                btn.setStyleSheet("text-align: left; padding: 12px; font-size: 14px; border: none;")
+                return btn
+
+            def build_dashboard(self, view):
+                layout = QVBoxLayout(view)
+                kpi_grid = QGridLayout()
+                self.kpi_labels = {
+                    'Accuracy': QLabel("Acc: --%"), 'F1_Score': QLabel("F1: --%"),
+                    'Precision': QLabel("Prec: --%"), 'Recall': QLabel("Rec: --%"),
+                    'Customer_Satisfaction': QLabel("CSAT: --%"), 'Total_Analyzed': QLabel("Records: --")
+                }
+                
+                col = 0
+                for key, lbl in self.kpi_labels.items():
+                    lbl.setFont(QFont("Segoe UI", 12))
+                    lbl.setStyleSheet("background-color: #2D2D2D; padding: 20px; border-radius: 8px;")
+                    lbl.setAlignment(Qt.AlignCenter)
+                    kpi_grid.addWidget(lbl, 0, col)
+                    col += 1
+                    
+                layout.addLayout(kpi_grid)
+                self.charts = DashboardCharts(self)
+                layout.addWidget(self.charts)
+
+            def build_chatbot(self, view):
+                layout = QVBoxLayout(view)
+                self.chat_history = QTextEdit()
+                self.chat_history.setReadOnly(True)
+                self.chat_history.setStyleSheet("background-color: #1E1E1E; border: 1px solid #333; font-size: 14px; padding: 10px;")
+                layout.addWidget(self.chat_history)
+
+                input_layout = QHBoxLayout()
+                self.chat_input = QLineEdit()
+                self.chat_input.returnPressed.connect(self.send_chat)
+                btn_send = QPushButton("Send")
+                btn_send.clicked.connect(self.send_chat)
+                
+                input_layout.addWidget(self.chat_input)
+                input_layout.addWidget(btn_send)
+                layout.addLayout(input_layout)
+
+            def build_settings(self, view):
+                layout = QFormLayout(view)
+                
+                # OpenRouter Key
+                self.input_openrouter = QLineEdit(Config.get_openrouter_key())
+                self.input_openrouter.setEchoMode(QLineEdit.Password)
+                layout.addRow("OpenRouter API Key:", self.input_openrouter)
+                
+                # HuggingFace Key (Restored)
+                self.input_hf = QLineEdit(Config.get_huggingface_key())
+                self.input_hf.setEchoMode(QLineEdit.Password)
+                layout.addRow("HuggingFace API Key:", self.input_hf)
+
+                btn_save = QPushButton("Save Keys")
+                btn_save.clicked.connect(self.save_settings)
+                layout.addRow(btn_save)
+
+            def save_settings(self):
+                Config.update_key("OPENROUTER_API_KEY", self.input_openrouter.text())
+                Config.update_key("HUGGINGFACE_API_KEY", self.input_hf.text())
+                QMessageBox.information(self, "Success", "Settings saved securely.")
+
+            def run_pipeline(self):
+                self.btn_train.setText("⏳ Retraining Models...")
+                self.btn_train.setEnabled(False)
+                self.worker = MLWorker()
+                self.worker.finished.connect(self.update_dashboard)
+                self.worker.start()
+
+            def update_dashboard(self, metrics, conf_matrix):
+                self.metrics = metrics
+                self.kpi_labels['Accuracy'].setText(f"Acc: {metrics['Accuracy']}%")
+                self.kpi_labels['F1_Score'].setText(f"F1: {metrics['F1_Score']}%")
+                self.kpi_labels['Precision'].setText(f"Prec: {metrics['Precision']}%")
+                self.kpi_labels['Recall'].setText(f"Rec: {metrics['Recall']}%")
+                self.kpi_labels['Customer_Satisfaction'].setText(f"CSAT: {metrics['Customer_Satisfaction']}%")
+                self.kpi_labels['Total_Analyzed'].setText(f"Records: {metrics['Total_Analyzed']}")
+
+                self.charts.plot_data(metrics, conf_matrix)
+                
+                # Confirm HuggingFace ran successfully
+                if 'HF_Comparison' in metrics and isinstance(metrics['HF_Comparison'], list):
+                    self.chat_history.append("<i>System: HuggingFace Transformer comparison executed successfully.</i>")
+                    
+                self.btn_train.setText("▶ Retrain ML Pipeline")
+                self.btn_train.setEnabled(True)
+
+            def send_chat(self):
+                user_text = self.chat_input.text()
+                if not user_text.strip(): return
+                self.chat_history.append(f"<b style='color:#BB86FC;'>You:</b> {user_text}<br>")
+                self.chat_input.clear()
+                
+                response = self.copilot.get_response(user_text, self.metrics)
+                self.chat_history.append(f"<b style='color:#03DAC6;'>AI Copilot:</b> {response.replace(chr(10), '<br>')}<br><br>")
+                self.chat_history.verticalScrollBar().setValue(self.chat_history.verticalScrollBar().maximum())
+
+            def export_pdf(self):
+                if not self.metrics:
+                    QMessageBox.warning(self, "Error", "No data to export. Run the pipeline first.")
+                    return
+                    
+                path, _ = QFileDialog.getSaveFileName(self, "Save PDF Report", "output/Executive_Report.pdf", "PDF Files (*.pdf)")
+                if path:
+                    c = canvas.Canvas(path)
+                    c.drawString(100, 800, "AI Business Intelligence - Executive Report")
+                    c.drawString(100, 780, f"Total Analyzed: {self.metrics['Total_Analyzed']}")
+                    c.drawString(100, 760, f"Customer Satisfaction: {self.metrics['Customer_Satisfaction']}%")
+                    c.drawString(100, 740, f"Top Complaints: {', '.join(self.metrics['Top_Negative_Words'])}")
+                    c.drawString(100, 720, f"Top Strengths: {', '.join(self.metrics['Top_Positive_Words'])}")
+                    c.save()
+                    QMessageBox.information(self, "Success", "PDF Report Saved Successfully!")   
+
+
+    main.py --------------------------------------------------------------------------------
+
+        import sys
+        import os
+        from PySide6.QtWidgets import QApplication
+        from ui.main_window import MainWindow
+
+        if __name__ == "__main__":
+            # Ensure directories exist
+            os.makedirs('data', exist_ok=True)
+            os.makedirs('output', exist_ok=True)
+            os.makedirs('charts', exist_ok=True)
+
+            app = QApplication(sys.argv)
+            
+            # Optional: Set global application font
+            font = app.font()
+            font.setFamily("Segoe UI")
+            app.setFont(font)
+
+            window = MainWindow()
+            window.show()
+            sys.exit(app.exec())
+
+--------------------------------------------------------------------------------------------
+
+
+------------------- 🚀 Setup and Run Instructions for the Presentation --------------------
+
+    Install Dependencies:
+    Open your terminal/command prompt and run:
+
+    Bash
+        pip install -r requirements.txt
+    Handle API Keys securely:
+    Copy the .env.example file and rename it to .env.
+    You can either paste your API keys directly into this file, or launch the app and use the Settings panel in the GUI to type them in (it will write them to the .env securely).
+
+    Place your Datasets:
+    Ensure Amazon_train.csv, Twitter.csv, and Flipkart.csv are placed directly into the data/ folder.
+
+    Launch the Software:
+
+    Bash
+        python main.py
+
+--------------------------------------------------------------------------------------------
+
+
